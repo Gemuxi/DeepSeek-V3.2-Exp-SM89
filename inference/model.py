@@ -14,6 +14,7 @@ world_size = 1
 rank = 0
 block_size = 128
 
+
 @dataclass
 class ModelArgs:
     """
@@ -477,7 +478,10 @@ class Indexer(torch.nn.Module):
         self.k_scale_cache[:bsz, start_pos:end_pos] = k_scale
         weights = self.weights_proj(x.float()) * self.n_heads ** -0.5
         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
-        index_score = fp8_index(q_fp8.contiguous(), weights, self.k_cache[:bsz, :end_pos].contiguous(), self.k_scale_cache[:bsz, :end_pos].contiguous())
+        index_score = fp8_index(q=q_fp8.contiguous(),
+                                q_s=weights.squeeze(-1).contiguous(),
+                                k=self.k_cache[:bsz, :end_pos].contiguous(),
+                                k_s=self.k_scale_cache[:bsz, :end_pos].squeeze(-1).contiguous())
         if mask is not None:
             index_score += mask
         topk_indices = index_score.topk(min(self.index_topk, end_pos), dim=-1)[1]
@@ -914,10 +918,24 @@ class Transformer(nn.Module):
 
 
 if __name__ == "__main__":
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend='nccl' if torch.cuda.is_available() else 'gloo',
+            init_method='tcp://127.0.0.1:23456',
+            world_size=world_size,
+            rank=rank
+        )
+
     torch.set_default_dtype(torch.bfloat16)
     torch.set_default_device("cuda")
     torch.manual_seed(0)
     args = ModelArgs()
+    args.n_layers = 2
+    args.vocab_size = 2048
     x = torch.randint(0, args.vocab_size, (2, 128))
+    print(x.size())
     model = Transformer(args)
     print(model(x).size())
+
+    if dist.is_initialized():
+        dist.destroy_process_group()
